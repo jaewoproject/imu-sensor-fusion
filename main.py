@@ -759,6 +759,15 @@ async def process_serial_queue(queue: asyncio.Queue):
                                 "ts": ts,
                             }))
                         
+                        
+                        # 🔬 노이즈 측정 자동 저장 (빵판 vs PCB 비교용)
+                        try:
+                            from tools.noise_measure import save_noise_snapshot, get_hardware_label
+                            hw_label = get_hardware_label()
+                            save_noise_snapshot(calibrator, label=hw_label)
+                        except Exception as e:
+                            log.debug(f"노이즈 측정 저장 스킵: {e}")
+
                         msg = {
                             "type": "status",
                             "text": "READY",
