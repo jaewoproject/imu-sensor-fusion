@@ -1,4 +1,5 @@
 import numpy as np
+from collections import deque
 from scipy.spatial.transform import Rotation
 
 class ESKF:
@@ -31,8 +32,8 @@ class ESKF:
         
         # ZUPT Window
         self.window_size = 15
-        self.a_win = []
-        self.g_win = []
+        self.a_win = deque(maxlen=15)
+        self.g_win = deque(maxlen=15)
 
         # Pre-allocated matrices to avoid per-frame heap churn (3 ESKF × 85Hz)
         self._Fx = np.eye(15)
@@ -136,9 +137,6 @@ class ESKF:
         
         self.a_win.append(accel)
         self.g_win.append(gyro)
-        if len(self.a_win) > self.window_size:
-            self.a_win.pop(0)
-            self.g_win.pop(0)
             
         # 4. Adaptive Q & Damping & Clamping
         # ZUPT 상태 점검 (predict() 직전에 밖에서 세팅될 수도 있으므로 여기서 방어적 처리)

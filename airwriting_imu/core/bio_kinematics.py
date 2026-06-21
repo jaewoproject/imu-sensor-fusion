@@ -16,6 +16,7 @@ Bio Kinematics -- ICOR Modeling + Differential Kinematics
 """
 
 import numpy as np
+from collections import deque
 from scipy.spatial.transform import Rotation
 from typing import Tuple, Optional
 
@@ -65,7 +66,7 @@ class ICORModel:
         self.current_angle = 0.0       # rad
         self.current_radius = (self.r_min + self.r_max) / 2.0
         self.icor_position = np.zeros(2)  # 2D ICOR 위치 (관절 로컬)
-        self.trajectory = []
+        self.trajectory = deque(maxlen=500)
     
     def update(self, angle_rad: float) -> np.ndarray:
         """
@@ -93,8 +94,6 @@ class ICORModel:
         ])
         
         self.trajectory.append(self.icor_position.copy())
-        if len(self.trajectory) > 500:
-            self.trajectory.pop(0)
         
         return self.icor_position
     
