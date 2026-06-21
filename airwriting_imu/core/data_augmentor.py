@@ -7,7 +7,6 @@ JW v1 — Data Augmentor
 
 import numpy as np
 import copy
-import random
 
 
 class DataAugmentor:

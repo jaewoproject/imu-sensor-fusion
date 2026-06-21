@@ -317,6 +317,7 @@
             <button class="ctrl-btn" onclick="toggleGrid()"><kbd>G</kbd> Grid</button>
             <button class="ctrl-btn" onclick="toggleConnection()"><kbd>Space</kbd> Connect</button>
             <button class="ctrl-btn" onclick="toggleDashboard()"><kbd>D</kbd> Dashboard</button>
+            <button class="ctrl-btn" onclick="restartServer()" style="color: var(--error); border-color: var(--error);">🔄 서버 재시작</button>
         </div>
     </div>
 
@@ -351,15 +352,15 @@
     <div class="writing-indicator" id="writing-indicator"><div class="writing-badge">✏️ WRITING</div></div>
     <div class="morph-indicator" id="morph-indicator"><div class="morph-text">✨ Morphing...</div></div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineMaterial.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineSegmentsGeometry.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineGeometry.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/Line2.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="js/libs/three.min.js"></script>
+    <script src="js/libs/LineMaterial.js"></script>
+    <script src="js/libs/LineSegmentsGeometry.js"></script>
+    <script src="js/libs/LineGeometry.js"></script>
+    <script src="js/libs/Line2.js"></script>
+    <script src="js/libs/OrbitControls.js"></script>
+    <script src="js/libs/chart.js"></script>
     <script src="js/digital_twin.js?v=1.0"></script>
-    <script src="js/main.js?v=9.0"></script>
+    <script src="js/main.js?v=10.0"></script>
     <script>
         // Inertial Intelligence Dashboard toggle (I key)
         let _dtDashboard = null;

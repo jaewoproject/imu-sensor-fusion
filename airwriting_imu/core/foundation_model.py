@@ -12,7 +12,6 @@ Foundation Model — TartanIMU-inspired Inertial Foundation Model
 영감: TartanIMU (CMU, 2025) — Cross-robot foundation model for IO
 """
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

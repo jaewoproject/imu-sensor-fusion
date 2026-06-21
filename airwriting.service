@@ -1,0 +1,16 @@
+[Unit]
+Description=AirWriting IMU Digital Twin Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wodn
+WorkingDirectory=/home/wodn/airwriting_imu_only
+ExecStart=/usr/bin/python3 main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -423,28 +423,22 @@ class YawStabilizer:
         
         Returns: corrected_s3_gyro (3,) — Madgwick에 직접 넣을 값
         """
-        # Step 1: 자이로 바이어스 보정 (ZARU)
-        gyro_debiased = self.bias_estimator.update(s3_accel, s3_gyro, is_writing)
+        # Step 1 & 2: (삭제) ZARU 및 S1 Anchor 보정이 시간 경과에 따라 
+        # 잘못된 바이어스를 누적시켜 갑자기 튀는 현상(Jumping)의 주범이 되므로 비활성화.
         
-        # Step 2: S1 앵커 보정 — 비활성화
-        # S1과 S3의 물리적 장착 방향 불일치로 양성 피드백이 발생하므로 완전히 비활성화.
-        # update() 호출도 제거하여 무한 적분(deviation 수천도 누적) 방지.
-        anchor_correction = 0.0
-        
-        # Step 3: 적응형 자기장 Yaw 보정
+        # Step 3: 적응형 자기장 Yaw 보정 (이것만 유지)
         mag_yaw_correction = 0.0
         if s3_mag is not None and current_q_wxyz is not None:
             trust = self.mag_fusion.evaluate(s3_mag, dt)
             
             if trust > 0.5:
                 yaw_error = self.mag_fusion.compute_yaw_correction(s3_mag, current_q_wxyz)
-                # 신뢰도에 비례하는 보정 강도
                 mag_gain = 0.005 * trust  # 최대 0.005 rad/s 보정
                 mag_yaw_correction = -yaw_error * mag_gain
         
-        # 합성: Z축(Yaw)에만 보정 적용
-        corrected = gyro_debiased.copy()
-        corrected[2] += anchor_correction + mag_yaw_correction
+        # 합성: 원본 자이로에 Z축(Yaw) 자기장 보정만 미세하게 추가
+        corrected = s3_gyro.copy()
+        corrected[2] += mag_yaw_correction
         
         return corrected
     

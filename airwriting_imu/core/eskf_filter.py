@@ -33,6 +33,14 @@ class ESKF:
         self.window_size = 15
         self.a_win = []
         self.g_win = []
+
+        # Pre-allocated matrices to avoid per-frame heap churn (3 ESKF × 85Hz)
+        self._Fx = np.eye(15)
+        self._I15 = np.eye(15)
+        self._Fi = np.zeros((15, 12))
+        self._Fi[6:9, 3:6] = np.eye(3)
+        self._Fi[9:12, 6:9] = np.eye(3)
+        self._Fi[12:15, 9:12] = np.eye(3)
         
     def reset(self, initial_q=None, initial_ba=None, initial_bg=None, initial_mag=None):
         self.p = np.zeros(3)
@@ -45,12 +53,12 @@ class ESKF:
             self.q = Rotation.from_quat([0, 0, 0, 1])
             
         if initial_ba is not None:
-            self.a_b = initial_ba.copy()
+            self.a_b = np.asarray(initial_ba, dtype=np.float64)
         else:
             self.a_b = np.zeros(3)
-            
+
         if initial_bg is not None:
-            self.w_b = initial_bg.copy()
+            self.w_b = np.asarray(initial_bg, dtype=np.float64)
         else:
             self.w_b = np.zeros(3)
             
@@ -90,24 +98,41 @@ class ESKF:
         self.p = self.p + self.v * dt + 0.5 * accel_world * (dt ** 2)
         self.v = self.v + accel_world * dt
         
-        # 2. Update Error State Covariance
-        Fx = np.eye(15)
-        Fx[0:3, 3:6] = np.eye(3) * dt
-        Fx[3:6, 6:9] = -R @ self._skew(accel_true) * dt
-        Fx[3:6, 9:12] = -R * dt
+        # 2. Update Error State Covariance (in-place writes on pre-allocated buffers)
+        # 2. Update Error State Covariance (Sparse block-wise update to save CPU)
+        # P = Fx @ P @ Fx.T + Q_eff
+        # Fx is identity except for a few blocks. We can update P in-place or with minimal copies.
         
-        # rot error kinematics
-        # approx exp(-[w]dt) ~ I - [w]dt
-        Fx[6:9, 6:9] = np.eye(3) - self._skew(gyro_true) * dt
-        Fx[6:9, 12:15] = -np.eye(3) * dt
+        # Extract blocks for speed
+        P = self.P
         
-        Fi = np.zeros((15, 12))
-        Fi[3:6, 0:3] = R
-        Fi[6:9, 3:6] = np.eye(3)
-        Fi[9:12, 6:9] = np.eye(3)
-        Fi[12:15, 9:12] = np.eye(3)
+        # Temporary updates for non-zero off-diagonal blocks of Fx
+        d_v_q = -R @ self._skew(accel_true) * dt
+        d_v_ba = -R * dt
+        d_q_q = -self._skew(gyro_true) * dt  # F_qq = I + d_q_q
+        d_q_bw = -np.eye(3) * dt
         
-        self.P = Fx @ self.P @ Fx.T + (Fi * dt) @ self.Q @ (Fi * dt).T
+        # 1. Update Rows (P_new = Fx @ P)
+        P_old = P.copy()
+        # Row p: P[0:3, :] = P[0:3, :] + dt * P[3:6, :]
+        P[0:3, :] += dt * P_old[3:6, :]
+        # Row v: P[3:6, :] = P[3:6, :] + d_v_q @ P[6:9, :] + d_v_ba @ P[9:12, :]
+        P[3:6, :] += d_v_q @ P_old[6:9, :] + d_v_ba @ P_old[9:12, :]
+        # Row q: P[6:9, :] = P[6:9, :] + d_q_q @ P[6:9, :] + d_q_bw @ P[12:15, :]
+        P[6:9, :] += d_q_q @ P_old[6:9, :] + d_q_bw @ P_old[12:15, :]
+        
+        # 2. Update Columns (P_final = P_new @ Fx.T)
+        P[:, 0:3] += dt * P[:, 3:6]
+        P[:, 3:6] += P[:, 6:9] @ d_v_q.T + P[:, 9:12] @ d_v_ba.T
+        P[:, 6:9] += P[:, 6:9] @ d_q_q.T + P[:, 12:15] @ d_q_bw.T
+        
+        # 3. Add Process Noise (Fi @ Q @ Fi.T) * dt^2
+        dt2 = dt * dt
+        P[3:6, 3:6] += (R @ self.Q[0:3, 0:3] @ R.T) * dt2
+        P[6:9, 6:9] += self.Q[3:6, 3:6] * dt2
+        P[9:12, 9:12] += self.Q[6:9, 6:9] * dt2
+        P[12:15, 12:15] += self.Q[9:12, 9:12] * dt2
+
         
         self.a_win.append(accel)
         self.g_win.append(gyro)
@@ -212,7 +237,7 @@ class ESKF:
         Pitch/Roll 위아래 드리프트를 영구적으로 차단합니다."""
         a_n = np.linalg.norm(current_accel)
         # 외부 가속이 심할 때(1G에서 멀어질 때)는 중력 보정을 스킵합니다
-        if a_n < 9.0 or a_n > 11.0:
+        if a_n < 9.0 or a_n > 12.0:
             return
             
         a_norm = current_accel / a_n

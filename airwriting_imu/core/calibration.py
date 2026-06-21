@@ -1,6 +1,10 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+# 정지 자세에서 허용되는 가속도 표준편차 상한 (m/s²).
+# 자연스러운 손 떨림은 ~0.2 m/s² 이내. 이를 넘으면 캘리브레이션 정확도가 떨어짐.
+ACCEL_STD_WARN_THRESHOLD = 0.8
+
 class Calibrator:
     def __init__(self, required_samples: int = 300):
         self.req_samples = required_samples
@@ -10,11 +14,16 @@ class Calibrator:
             's3_a': [], 's3_g': [], 's3_m': []
         }
         self.is_calibrated = False
-        
+
         self.ba = {'s1': np.zeros(3), 's2': np.zeros(3), 's3': np.zeros(3)}
         self.bg = {'s1': np.zeros(3), 's2': np.zeros(3), 's3': np.zeros(3)}
         self.q_align = {'s1': np.array([0.,0.,0.,1.]), 's2': np.array([0.,0.,0.,1.]), 's3': np.array([0.,0.,0.,1.])}
         self.m_ref = {'s3': np.array([1,0,0])}  # 지자기 캘리브레이션 레퍼런스
+
+        # 캘리브레이션 품질 진단: 정지 자세 가속도 표준편차 (축별 norm).
+        # ACCEL_STD_WARN_THRESHOLD 초과 시 main.py가 사용자에게 재캘리브레이션을 안내.
+        self.accel_std = {'s1': 0.0, 's2': 0.0, 's3': 0.0}
+        self.quality_ok = True
 
     def add_sample(self, frame) -> bool:
         if self.is_calibrated:
@@ -40,7 +49,7 @@ class Calibrator:
 
     def _calc_alignment(self, acc_samples, gyr_samples):
         if len(acc_samples) == 0:
-            return np.zeros(3), np.array([0, 0, 0, 1])
+            return np.zeros(3), np.zeros(3), np.array([0, 0, 0, 1])
             
         acc = np.array(acc_samples)
         gyr = np.array(gyr_samples)
@@ -94,7 +103,19 @@ class Calibrator:
         self.ba['s1'], self.bg['s1'], self.q_align['s1'] = self._calc_alignment(self.samples['s1_a'], self.samples['s1_g'])
         self.ba['s2'], self.bg['s2'], self.q_align['s2'] = self._calc_alignment(self.samples['s2_a'], self.samples['s2_g'])
         self.ba['s3'], self.bg['s3'], self.q_align['s3'] = self._calc_alignment(self.samples['s3_a'], self.samples['s3_g'])
-        
+
+        # 정지 자세 품질 검사: 가속도 표준편차가 임계값을 넘으면 quality_ok=False
+        # (사용자가 캘리브레이션 중 손을 떨었거나 외부 진동이 섞였을 때)
+        self.quality_ok = True
+        for sid, key in (('s1', 's1_a'), ('s2', 's2_a'), ('s3', 's3_a')):
+            if len(self.samples[key]) > 0:
+                acc = np.array(self.samples[key])
+                # 축별 표준편차의 norm — 어느 한 축이라도 흔들리면 잡힘
+                std_per_axis = np.std(acc, axis=0)
+                self.accel_std[sid] = float(np.linalg.norm(std_per_axis))
+                if self.accel_std[sid] > ACCEL_STD_WARN_THRESHOLD:
+                    self.quality_ok = False
+
         # [Phase 5] 지자기 캘리브레이션 (초기 정면 헤딩 고정)
         if len(self.samples['s3_m']) > 0:
             m_mean = np.mean(self.samples['s3_m'], axis=0)

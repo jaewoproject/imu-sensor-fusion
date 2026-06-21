@@ -129,6 +129,24 @@ joints.forearm.visible = false;
 joints.hand.visible = false;
 joints.finger.visible = false;
 
+// ── [Phase 2] 레이저 빔 시각화 ──
+const laserGeom = new THREE.BufferGeometry();
+laserGeom.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 0,0,-0.68], 3));
+const laserMat = new THREE.LineBasicMaterial({ 
+    color: 0xff3333, transparent: true, opacity: 0.0, linewidth: 2 
+});
+const laserLine = new THREE.Line(laserGeom, laserMat);
+scene.add(laserLine);
+
+// 레이저 히트 포인트 (벽면 위의 빛나는 점)
+const hitGlowGeom = new THREE.CircleGeometry(0.01, 32);
+const hitGlowMat = new THREE.MeshBasicMaterial({ 
+    color: 0xff3333, transparent: true, opacity: 0.0, side: THREE.DoubleSide 
+});
+const hitGlow = new THREE.Mesh(hitGlowGeom, hitGlowMat);
+hitGlow.position.z = -0.68;
+scene.add(hitGlow);
+
 function makeBone(color) {
   const geom = new THREE.CylinderGeometry(0.003, 0.003, 1, 8);
   geom.translate(0, 0.5, 0);
@@ -351,22 +369,28 @@ function addLivePoint(x, y, z) {
 // ── WebSocket ──
 let ws = null, wsConnected = false;
 let frameCounter = 0, fpsCounter = 0, lastFpsTime = performance.now();
+let _wsReconnectDelay = 1000;
 
 function connectWebSocket() {
   const url = `ws://${location.hostname || "localhost"}:12347`;
   ws = new WebSocket(url);
-  ws.onopen = () => { wsConnected = true; updateStatus(true); };
-  ws.onmessage = (e) => { 
-    try { 
+  ws.onopen = () => { wsConnected = true; updateStatus(true); _wsReconnectDelay = 1000; };
+  ws.onmessage = (e) => {
+    try {
       const data = JSON.parse(e.data);
       if (data.type) {
         handleServerMessage(data);
       } else {
-        handleFrame(data); 
+        handleFrame(data);
       }
-    } catch (err) {} 
+    } catch (err) {}
   };
-  ws.onclose = () => { wsConnected = false; updateStatus(false); setTimeout(connectWebSocket, 3000); };
+  ws.onclose = () => {
+    wsConnected = false;
+    updateStatus(false);
+    _wsReconnectDelay = Math.min(_wsReconnectDelay * 1.5, 30000);
+    setTimeout(connectWebSocket, _wsReconnectDelay);
+  };
   ws.onerror = () => {};
 }
 
@@ -389,7 +413,7 @@ let wasWriting = false;  // 획 분리용 상태 추적
 // 영점 조절 오프셋 및 민감도(마우스 감도 역할)
 let positionOffset = [0, 0, 0];
 let rawFingertip = [0, 0, 0];
-const SENSITIVITY = 0.30; // 커서가 움직이는 배율 (기존 0.5에서 극단적으로 더 줄임)
+const SENSITIVITY = 0.30; // 원본 감도 복구 (커서 너무 빠른 현상 방지)
 
 // ── 센서 장착 각도 보정 ──
 // ICM20948이 대각선으로 장착된 경우, 이 값을 조정하세요
@@ -413,14 +437,28 @@ function applyRotation(x, y) {
   ];
 }
 
-// ── 순간이동 방지 + EMA 스무딩 ──
-let prevSmoothedTip = null;
-let framesSinceStart = 0;
-const LERP_FACTOR = 0.35;
-const TELEPORT_THRESHOLD = 0.15;
-const AUTO_CENTER_FRAME = 10;
-const EMA_ALPHA = 0.25;  // EMA 스무딩 (0=느림, 1=즉시). 흔들림 줄이려면 낮추세요
-let emaTip = null;
+// ── [Phase 3] 이중 스무딩 제거 ──
+// 백엔드: ComplementaryFilter + OneEuro가 이미 노이즈 처리
+// 프론트엔드: 추가 스무딩 없이 직접 매핑 (지연 50ms→0ms)
+let _lastOrientations = null;  // 15Hz orientations를 매 프레임 유지 (깜빡임 방지)
+
+// ── 영점(Auto-Recenter) 트리거 ──
+// 캘리브레이션 직후 무조건 N프레임 후 recenter 하면, 사용자가 그동안
+// 손을 움직이면 영점이 잘못 잡힘. 따라서:
+//   1) backend 'READY' status 수신 후에만 카운트 시작
+//   2) ray_hit 변동(=motion)이 작을 때만(정지 감지) 트리거
+//   3) 최대 대기 시간(timeout) 안에서 위 조건 충족되면 recenter
+let backendReady = false;
+let framesSinceReady = 0;
+let autoRecenterDone = false;
+const AUTO_RECENTER_WAIT_MAX = 200;       // 약 2.4초 (~85Hz)
+const AUTO_RECENTER_STATIONARY_NEED = 30; // 약 0.35초 연속 정지
+const AUTO_RECENTER_MOTION_EPS = 0.02;    // ray_hit 단위(rad) — 매우 작은 움직임만 허용
+let _stationaryStreak = 0;
+let _lastRayHit = null;
+
+// 순간이동 방지만 유지 (리센터/재연결 시 점프 방지)
+const TELEPORT_THRESHOLD = 1.5;  // 0.5→1.5로 완화 (백엔드 필터링으로 충분)
 
 function lerpVec3(a, b, t) {
   return [
@@ -444,67 +482,81 @@ function recenterView() {
     ws.send(JSON.stringify({ type: "reset_yaw" }));
   }
   
-  prevSmoothedTip = null;
-  emaTip = null;
   clearTrajectory();
 }
 
 function handleFrame(data) {
   frameCounter++;
   fpsCounter++;
-  framesSinceStart++;
 
-  // ── 좌표 매핑: 레이저 포인터 (Ray Casting) ──
+  // ── [Phase 2+3] 좌표 매핑: 백엔드 OneEuro 필터링된 ray_hit 직접 사용 ──
   if (data.ray_hit) {
     const rx = data.ray_hit[0];
     const rz = data.ray_hit[1];
     rawFingertip[0] = rx;
     rawFingertip[2] = rz;
 
-    if (framesSinceStart === AUTO_CENTER_FRAME) {
-      recenterView();
-    }
+    // 영점 자동 잡기: backend가 READY 신호를 준 뒤, 정지 자세를 감지하면 트리거
+    if (backendReady && !autoRecenterDone) {
+      framesSinceReady++;
 
-    // 디버그: 50프레임마다 원본 좌표 출력
-    if (frameCounter % 50 === 0) {
-      console.log(`ray_hit[0]=${rx.toFixed(4)} ray_hit[1]=${rz.toFixed(4)}`);
+      let motion = Infinity;
+      if (_lastRayHit !== null) {
+        const dx = rx - _lastRayHit[0];
+        const dz = rz - _lastRayHit[1];
+        motion = Math.sqrt(dx * dx + dz * dz);
+      }
+      _lastRayHit = [rx, rz];
+
+      if (motion < AUTO_RECENTER_MOTION_EPS) {
+        _stationaryStreak++;
+      } else {
+        _stationaryStreak = 0;
+      }
+
+      const stationaryEnough = _stationaryStreak >= AUTO_RECENTER_STATIONARY_NEED;
+      const timedOut = framesSinceReady >= AUTO_RECENTER_WAIT_MAX;
+      if (stationaryEnough || timedOut) {
+        recenterView();
+        autoRecenterDone = true;
+      }
     }
 
     const ox = positionOffset[0], oz = positionOffset[2];
 
-    // 센서 방향 → 화면 좌표 (반전/회전 보정 포함)
+    // 센서 방향 → 화면 좌표 (원본 깃허브 로직 복구: X축 반전 포함)
     const rotated = applyRotation(
-      -(rx - ox) * SENSITIVITY,   // X축 반전
-      (rz - oz) * SENSITIVITY     // +Z = 위 방향 (반전 불필요)
+      -(rx - ox) * SENSITIVITY,   // X축 반전 (원본과 동일)
+      (rz - oz) * SENSITIVITY     // Y축 (위아래)
     );
-    let t = [rotated[0], rotated[1], -0.4];
+    const tipX = rotated[0];
+    const tipY = rotated[1];
+    const tipZ = -0.4;
 
-    // ── 순간이동 방지 ──
-    if (prevSmoothedTip !== null) {
-      const dist = vec3Dist(t, prevSmoothedTip);
-      if (dist > TELEPORT_THRESHOLD) {
-        t = lerpVec3(prevSmoothedTip, t, LERP_FACTOR);
-      }
-    }
-    prevSmoothedTip = [t[0], t[1], t[2]];
+    // 직접 적용 (이중 스무딩 제거 — 백엔드 OneEuro가 이미 smooth)
+    fingertipMesh.position.set(tipX, tipY, tipZ);
 
-    // ── EMA 스무딩 ──
-    if (emaTip === null) {
-      emaTip = [t[0], t[1], t[2]];
-    } else {
-      emaTip[0] = EMA_ALPHA * t[0] + (1 - EMA_ALPHA) * emaTip[0];
-      emaTip[1] = EMA_ALPHA * t[1] + (1 - EMA_ALPHA) * emaTip[1];
-      emaTip[2] = t[2];
-    }
+    // 투영 섀도우 동기화
+    projectionMesh.position.x = tipX;
+    projectionMesh.position.y = tipY;
 
-    fingertipMesh.position.set(emaTip[0], emaTip[1], emaTip[2]);
+    // [Phase 2] 레이저 빔 업데이트
+    const laserPos = laserLine.geometry.attributes.position;
+    laserPos.array[0] = tipX;
+    laserPos.array[1] = tipY;
+    laserPos.array[2] = tipZ;
+    laserPos.array[3] = tipX;
+    laserPos.array[4] = tipY;
+    laserPos.array[5] = -0.68;
+    laserPos.needsUpdate = true;
 
-    projectionMesh.position.x = emaTip[0];
-    projectionMesh.position.y = emaTip[1];
+    // 히트 글로우 위치
+    hitGlow.position.x = tipX;
+    hitGlow.position.y = tipY;
 
     if (data.fingertip) {
-      data.fingertip[0] = emaTip[0];
-      data.fingertip[1] = emaTip[1];
+      data.fingertip[0] = tipX;
+      data.fingertip[1] = tipY;
       data.fingertip[2] = -0.68;
     }
   }
@@ -523,13 +575,13 @@ function handleFrame(data) {
     }
   }
 
-  if (data.orientations) {
-    for (const [name, q] of Object.entries(data.orientations)) {
+  if (data.orientations) _lastOrientations = data.orientations;
+  if (_lastOrientations) {
+    for (const [name, q] of Object.entries(_lastOrientations)) {
       if (joints[name]) joints[name].quaternion.set(q[1], q[2], q[3], q[0]);
     }
-    // 펜(분필)을 실제 손가락 센서 각도로 물리적 방향 동기화
-    if (data.orientations.finger) {
-      const fq = data.orientations.finger;
+    if (_lastOrientations.finger) {
+      const fq = _lastOrientations.finger;
       fingertipMesh.quaternion.set(fq[1], fq[2], fq[3], fq[0]);
     }
   }
@@ -551,13 +603,17 @@ function handleFrame(data) {
     }
     addLivePoint(data.fingertip[0], data.fingertip[1], data.fingertip[2]);
     
-    // 쓰는 중일 때 포인트 프로젝션 강조
+    // 쓰는 중일 때 프로젝션 + 레이저 강조
     projectionMat.opacity = 0.8;
     projectionMat.color.setHex(0xef4444);
+    laserMat.opacity = 0.5;
+    hitGlowMat.opacity = 0.9;
   } else {
     // 평상시는 연한 검은 그림자
     projectionMat.opacity = 0.15;
-    projectionMat.color.setHex(0x000000); 
+    projectionMat.color.setHex(0x000000);
+    laserMat.opacity = 0.0;
+    hitGlowMat.opacity = 0.0;
   }
   wasWriting = currentlyWriting;
 
@@ -587,15 +643,14 @@ function handleFrame(data) {
           startDynamicRecording();
       } else if (isRecording) {
           if (buttonJustPressed) {
-              // 버튼 다시 누름 → 이전 녹화 즉시 저장 + 새 녹화 즉시 시작
+              // 버튼 다시 누름 → 다음 획 시작, 자동 저장 타이머만 취소하고 동일 세션 유지
               if (recordTimeout) { clearTimeout(recordTimeout); recordTimeout = null; }
-              sendToServer({ action: "stop_record" });
-              startDynamicRecording();
+              document.getElementById("train-status").textContent = "🔴 Recording Stroke...";
           } else if (!buttonPressed && window._prevWritingState) {
               // 버튼 뗌 → 1초 후 자동 저장
-              document.getElementById("train-status").textContent = "⏳ Waiting (1.0s)...";
+              document.getElementById("train-status").textContent = "⏳ Waiting (2.0s)...";
               if (recordTimeout) clearTimeout(recordTimeout);
-              recordTimeout = setTimeout(() => { stopRecordingAndRearm(); }, 1000);
+              recordTimeout = setTimeout(() => { stopRecordingAndRearm(); }, 2000);
           } else if (buttonPressed) {
               document.getElementById("train-status").textContent = "🔴 Recording Stroke...";
           }
@@ -826,6 +881,12 @@ function toggleConnection() {
   else connectWebSocket();
 }
 
+function restartServer() {
+  if (!confirm("서버를 재시작하시겠습니까?\n약 5초 후 자동 재연결됩니다.")) return;
+  sendToServer({ action: "restart_server" });
+  document.getElementById("train-status").textContent = "🔄 서버 재시작 중...";
+}
+
 function toggleDashboard() {
   const overlay = document.getElementById("dashboard-overlay");
   if (overlay.style.display === "none") {
@@ -1015,7 +1076,7 @@ function processTrainingMetrics(data) {
     // Append to UI list dynamically
     const isSelected = currentlySelectedClass === word ? "selected" : "";
     listHtml += `
-      <div class="class-item ${isSelected}" onclick="selectRealClass('${word}')">
+      <div class="class-item ${isSelected}" data-word="${word.replace(/"/g, '&quot;')}" onclick="selectRealClass(this.dataset.word)">
         <span>${word}</span>
         <span>${stats.samples}</span>
         <span>${classHistoryData[word].bestAcc.toFixed(1)}%</span>
@@ -1142,6 +1203,26 @@ function handleServerMessage(data) {
   else if (data.type === "dataset_info") {
     // 서버에서 받은 실제 데이터셋 정보로 Dashboard 업데이트
     updateDashboardWithDatasetInfo(data);
+  }
+  else if (data.type === "status") {
+    // 캘리브레이션 진행/완료 상태 — auto-recenter 게이트로 사용
+    const text = (data.text || "").toUpperCase();
+    if (text.startsWith("CALIBRATING")) {
+      // 새 캘리브레이션 시작 — recenter 상태 리셋
+      backendReady = false;
+      autoRecenterDone = false;
+      framesSinceReady = 0;
+      _stationaryStreak = 0;
+      _lastRayHit = null;
+    } else if (text === "READY") {
+      backendReady = true;
+      framesSinceReady = 0;
+      _stationaryStreak = 0;
+      _lastRayHit = null;
+    }
+    // (CALIBRATION SHAKY / MAG DISABLED 등은 그대로 표시만)
+    const statusEl = document.getElementById("train-status");
+    if (statusEl) statusEl.textContent = data.text || "";
   }
 }
 

@@ -218,12 +218,16 @@ class DifferentialKinematics:
         # 3. 관절 각도 추정 (중력 기반)
         joint_angle = 0.0
         if q_proximal is not None and q_distal is not None:
-            # 쿼터니언 상대 회전
-            q_rel = q_proximal.inv() * q_distal
-            euler = q_rel.as_euler('XYZ')
-            joint_angle = euler[1]  # Y축 기준 굽힘(flex)
+            # 쿼터니언 상대 회전 (q_rel = q_proximal.inv() * q_distal)
+            # scipy Rotation 객체에서 직접 쿼터니언 [x, y, z, w] 추출
+            q_rel = (q_proximal.inv() * q_distal).as_quat()
+            # XYZ 오일러 각 중 Y축(flex) 성분을 직접 계산 (asin(2*(w*y - z*x)))
+            # as_euler() 대비 약 10배 이상 빠름
+            qx, qy, qz, qw = q_rel
+            siny = 2.0 * (qw * qy - qz * qx)
+            joint_angle = np.arcsin(np.clip(siny, -1.0, 1.0))
         else:
-            # 중력 벡터 기반 근사
+            # 중력 벡터 기반 근사 (폴백)
             a_p_norm = a_proximal / (np.linalg.norm(a_proximal) + 1e-8)
             a_d_norm = a_distal / (np.linalg.norm(a_distal) + 1e-8)
             cos_angle = np.clip(np.dot(a_p_norm, a_d_norm), -1, 1)

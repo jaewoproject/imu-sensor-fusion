@@ -39,7 +39,9 @@ class OLEDSender:
             accuracy: 인식 정확도 (0~100)
         """
         if not self._esp32_addr:
+            log.debug("OLED: ESP32 주소 미설정, 전송 스킵")
             return
+        accuracy = max(0.0, min(100.0, accuracy))
         msg = f"OLED|{state}|{mode}|{headline}|{accuracy:.1f}"
         try:
             self._sock.sendto(msg.encode(), self._esp32_addr)
@@ -71,4 +73,11 @@ class OLEDSender:
         self.send_status("READY", "SYSTEM", quality, 100.0)
 
     def close(self):
-        self._sock.close()
+        if hasattr(self, '_sock') and self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+
+    def __del__(self):
+        self.close()

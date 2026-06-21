@@ -23,10 +23,21 @@ JW v1 — AirWriting AI Engine
   - 출력: 영문 글자/단어 인식 + 궤적 자동완성
 """
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# PyTorch 2.4+ 에서만 nn.RMSNorm 지원 — 하위 버전 호환 폴백
+if not hasattr(nn, "RMSNorm"):
+    class _RMSNorm(nn.Module):
+        def __init__(self, dim: int, eps: float = 1e-6):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(dim))
+            self.eps = eps
+        def forward(self, x):
+            rms = x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
+            return x / rms * self.weight
+    nn.RMSNorm = _RMSNorm
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -196,11 +207,12 @@ class DualModalVQTokenizer(nn.Module):
     IMU 시계열과 궤적 이미지를 하나의 공유 코드북으로 토큰화.
     Cross-Attention으로 두 모달리티의 정보를 융합한 뒤 양자화.
     """
-    def __init__(self, latent_dim: int = 64, codebook_size: int = 512):
+    def __init__(self, latent_dim: int = 64, codebook_size: int = 512, in_channels: int = 8):
         super().__init__()
-        self.motion_enc = MotionEncoder(in_channels=8, latent_dim=latent_dim)
+        self.in_channels = in_channels
+        self.motion_enc = MotionEncoder(in_channels=in_channels, latent_dim=latent_dim)
         self.image_enc = ImageEncoder(latent_dim=latent_dim)
-        self.motion_dec = MotionDecoder(out_channels=8, latent_dim=latent_dim)
+        self.motion_dec = MotionDecoder(out_channels=in_channels, latent_dim=latent_dim)
         
         # Cross-Attention: 이미지 특징이 모션 특징을 보강 (JW v1 고유)
         self.cross_attn = nn.MultiheadAttention(
@@ -413,15 +425,16 @@ class JWv1(nn.Module):
         num_classes: int = 62,   # a-z(26) + A-Z(26) + 0-9(10) or word vocab
         dropout: float = 0.1,
         latent_dim: int = 64,
+        in_channels: int = 8,
     ):
         super().__init__()
         self.d_model = d_model
         self.codebook_size = codebook_size
         self.num_classes = num_classes
-        
+
         # ─── Stage 1: VQ Tokenizer ───
         self.tokenizer = DualModalVQTokenizer(
-            latent_dim=latent_dim, codebook_size=codebook_size
+            latent_dim=latent_dim, codebook_size=codebook_size, in_channels=in_channels
         )
         
         # ─── Stage 2: Token → Mamba Backbone ───

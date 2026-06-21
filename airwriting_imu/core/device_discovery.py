@@ -31,7 +31,7 @@ def parse_discovery_response(payload: str) -> Optional[Tuple[str, int]]:
     except ValueError:
         return None
 
-    if udp_port <= 0:
+    if not (0 < udp_port <= 65535):
         return None
 
     return server_ip, udp_port

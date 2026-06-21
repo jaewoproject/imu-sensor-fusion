@@ -374,11 +374,13 @@ void readICM20948(SensorData9 &data) {
     int16_t ax = (I2C_ICM->read() << 8 | I2C_ICM->read());
     int16_t ay = (I2C_ICM->read() << 8 | I2C_ICM->read());
     int16_t az = (I2C_ICM->read() << 8 | I2C_ICM->read());
-    I2C_ICM->read();
-    I2C_ICM->read();
-    int16_t gx = (I2C_ICM->read() << 8 | I2C_ICM->read());
-    int16_t gy = (I2C_ICM->read() << 8 | I2C_ICM->read());
-    int16_t gz = (I2C_ICM->read() << 8 | I2C_ICM->read());
+    // [치명적 버그 수정] ICM20948은 ACCEL 바로 다음이 GYRO (사이에 TEMP 없음).
+    // 기존엔 MPU6050용 'read();read();'(accel/gyro 사이 TEMP 건너뛰기)를 그대로 복붙해
+    // GYRO_X를 버리고 gz에 TEMP를 읽어버림 → gz가 상수(~1.97rad/s) → yaw 무한 스핀.
+    // 레이아웃: ACCEL(0x2D~0x32) → GYRO(0x33~0x38) → TEMP(0x39~0x3A).
+    int16_t gx = (I2C_ICM->read() << 8 | I2C_ICM->read());  // 0x33,0x34 GYRO_X
+    int16_t gy = (I2C_ICM->read() << 8 | I2C_ICM->read());  // 0x35,0x36 GYRO_Y
+    int16_t gz = (I2C_ICM->read() << 8 | I2C_ICM->read());  // 0x37,0x38 GYRO_Z
 
     data.ax = ax * (9.81f / 4096.0f);
     data.ay = ay * (9.81f / 4096.0f);
@@ -556,7 +558,7 @@ void updateOLED(String letter, float accuracy) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
   delay(200);
   Serial.println("Starting AirWriting v3 (Hardcoded)...");
 

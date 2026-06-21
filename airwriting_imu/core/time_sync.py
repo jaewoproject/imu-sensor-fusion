@@ -35,7 +35,6 @@ class TimeSync:
         self.latency_ms = 0.0       # 추정된 편도 지연 (ms)
         self.is_synced = False       # 최소 10 샘플 수집 후 True
         self._sync_count = 0
-        self._esp32_boot_offset = 0  # ESP32 부팅 시각 (python time 기준)
 
     def update(self, esp32_timestamp_ms: int):
         """
@@ -50,12 +49,13 @@ class TimeSync:
         self._offsets.append(offset)
         self._sync_count += 1
 
-        # 중앙값 기반 오프셋 (아웃라이어 내성)
+        # 중앙값 기반 오프셋 (아웃라이어 내성, 짝수 길이도 정확한 중앙값 사용)
         if len(self._offsets) >= 5:
             sorted_offsets = sorted(self._offsets)
-            mid = len(sorted_offsets) // 2
-            self.offset_ms = sorted_offsets[mid]
-            self._esp32_boot_offset = self.offset_ms
+            n = len(sorted_offsets)
+            mid = n // 2
+            self.offset_ms = sorted_offsets[mid] if n % 2 != 0 else \
+                             (sorted_offsets[mid - 1] + sorted_offsets[mid]) / 2.0
 
         if not self.is_synced and self._sync_count >= 10:
             self.is_synced = True
@@ -105,4 +105,3 @@ class TimeSync:
         self.latency_ms = 0.0
         self.is_synced = False
         self._sync_count = 0
-        self._esp32_boot_offset = 0

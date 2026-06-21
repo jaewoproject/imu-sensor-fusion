@@ -1,0 +1,9 @@
+Please review the following 4 patches applied to a real-time IMU streaming server (Python 3.14, asyncio, websockets).
+The server processes 85Hz sensor data, runs AI inference, and streams to a frontend.
+
+1. Madgwick Filter for Ray Casting: We added the gradient descent step (Madgwick 2010 eq 25-33) to correct accelerometer pitch/roll drift, keeping yaw gyro-only.
+2. Debounce Frames: Changed from 6 (70ms) to 10 (118ms) to prevent short hand-jitters from triggering false Pen Up/Down states.
+3. ZUPT (Zero Velocity Update): Replaced hardcoded `s3_zupt = False` with `s3_eskf.detect_zupt()`. When stationary, we call `update_zupt(gyro)` to cancel bias drift.
+4. WebSocket 60Hz Limit: Instead of `ensure_future(ws_broadcast)` at 85Hz, we use `time.monotonic()` interval check of 16.7ms to cap broadcasting at 60Hz, preventing frontend rendering queue saturation.
+
+Are there any hidden bugs, concurrency issues, or mathematical flaws in this architecture? Reply with a short summary of potential risks and your final VERDICT (PASS or FAIL).

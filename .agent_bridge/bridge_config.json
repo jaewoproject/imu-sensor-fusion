@@ -1,0 +1,23 @@
+{
+  "agents": {
+    "claude": {
+      "type": "anthropic",
+      "model": "claude-3-5-sonnet-20240620",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "enabled": true
+    },
+    "gemini": {
+      "type": "google",
+      "model": "gemini-1.5-pro",
+      "api_key_env": "GEMINI_API_KEY",
+      "enabled": false
+    },
+    "codex": {
+      "type": "openai",
+      "model": "gpt-4o",
+      "api_key_env": "OPENAI_API_KEY",
+      "enabled": false
+    }
+  },
+  "watch_interval_seconds": 2
+}

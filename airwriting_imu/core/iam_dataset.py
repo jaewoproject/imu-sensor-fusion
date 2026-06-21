@@ -18,8 +18,6 @@ Kaggle: https://www.kaggle.com/datasets/nibinv23/iam-handwriting-word-database
 """
 
 import os
-import glob
-import json
 import numpy as np
 from pathlib import Path
 

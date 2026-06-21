@@ -12,14 +12,13 @@ Stage 3: EuclideanAnalyzer  -- 후처리 검증
 RNN-lite: 외부 히든 상태(h_t^ext)로 메모리 최소화 + 조기 인식 지원.
 """
 
-import time
-import math
 import logging
+import threading
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Callable, List, Tuple
+from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -245,9 +244,10 @@ class SparseStreamEngine:
         self.analyzer = EuclideanAnalyzer(
             num_classes=num_classes, high_threshold=0.7, low_threshold=0.3)
         
-        # 외부 히든 상태
+        # 외부 히든 상태 (asyncio.to_thread 호출 시 race condition 방지)
         self.h_detect = self.detector.init_hidden()
         self.h_recog = self.recognizer.init_hidden()
+        self._hidden_lock = threading.Lock()
         
         # 상태
         self.state = self.STATE_IDLE
@@ -283,41 +283,41 @@ class SparseStreamEngine:
             frame_data.get('az', 0), frame_data.get('gx', 0),
             frame_data.get('gy', 0), frame_data.get('gz', 0),
             frame_data.get('x', 0), frame_data.get('y', 0),
-        ], dtype=torch.float32).unsqueeze(0)
+        ], dtype=torch.float32).unsqueeze(0).to(self.h_detect.device)
         
-        # Stage 1: Binary Detection (매 프레임)
-        self.stats["detector_calls"] += 1
-        is_gesture, det_conf, self.h_detect = self.detector(
-            features, self.h_detect)
-        
-        # 버튼이 눌리면 강제 활성화
-        if is_writing:
-            is_gesture = torch.tensor([True])
-            det_conf = torch.tensor([1.0])
-        
-        if is_gesture.item():
-            self.gesture_frames += 1
-            self.idle_frames = 0
-            self.gesture_buffer.append(frame_data)
-            
-            # Stage 2: Multi-class Recognition (제스처 중에만)
-            self.stats["recognizer_calls"] += 1
-            logits, self.h_recog = self.recognizer(features, self.h_recog)
-            
-            # 조기 인식 시도 (제스처 완료 전에도)
-            if self.gesture_frames > 15:
-                self.wait_logits_history.append(logits)
-        else:
-            self.idle_frames += 1
-            
-            # 제스처 종료 판정 (10프레임 연속 유휴)
-            if self.idle_frames > 10 and len(self.gesture_buffer) > 5:
-                self._finalize_gesture()
-            
-            # 장시간 유휴: 상태 리셋
-            if self.idle_frames > 100:
-                self.h_recog = self.recognizer.init_hidden()
-                self.wait_logits_history.clear()
+        with self._hidden_lock:
+            # Stage 1: Binary Detection (매 프레임)
+            self.stats["detector_calls"] += 1
+            is_gesture, _, self.h_detect = self.detector(
+                features, self.h_detect)
+
+            # 버튼이 눌리면 강제 활성화
+            if is_writing:
+                is_gesture = torch.tensor([True])
+
+            if is_gesture.item():
+                self.gesture_frames += 1
+                self.idle_frames = 0
+                self.gesture_buffer.append(frame_data)
+
+                # Stage 2: Multi-class Recognition (제스처 중에만)
+                self.stats["recognizer_calls"] += 1
+                logits, self.h_recog = self.recognizer(features, self.h_recog)
+
+                # 조기 인식 시도 (제스처 완료 전에도)
+                if self.gesture_frames > 15:
+                    self.wait_logits_history.append(logits)
+            else:
+                self.idle_frames += 1
+
+                # 제스처 종료 판정 (10프레임 연속 유휴)
+                if self.idle_frames > 10 and len(self.gesture_buffer) > 5:
+                    self._finalize_gesture()
+
+                # 장시간 유휴: 상태 리셋
+                if self.idle_frames > 100:
+                    self.h_recog = self.recognizer.init_hidden()
+                    self.wait_logits_history.clear()
     
     def _finalize_gesture(self):
         """제스처 완료 -- Stage 3 검증 및 결과 출력."""
@@ -375,13 +375,14 @@ class SparseStreamEngine:
         }
     
     def reset(self):
-        self.h_detect = self.detector.init_hidden()
-        self.h_recog = self.recognizer.init_hidden()
-        self.state = self.STATE_IDLE
-        self.gesture_buffer.clear()
-        self.wait_logits_history.clear()
-        self.idle_frames = 0
-        self.gesture_frames = 0
+        with self._hidden_lock:
+            self.h_detect = self.detector.init_hidden()
+            self.h_recog = self.recognizer.init_hidden()
+            self.state = self.STATE_IDLE
+            self.gesture_buffer.clear()
+            self.wait_logits_history.clear()
+            self.idle_frames = 0
+            self.gesture_frames = 0
 
 
 # =====================================================================

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -3 verify_pipeline.py *)",
+      "Bash(py -3 dataset_quality_scan.py)",
+      "Bash(py -3 -m pyflakes airwriting_imu/core/ *)",
+      "Bash(py -3 -m pyflakes airwriting_imu/core/)"
+    ]
+  }
+}

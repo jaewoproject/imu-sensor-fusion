@@ -1,0 +1,17 @@
+{
+  "skipDangerousModePermissionPrompt": true,
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Bash(git checkout *)",
+      "Read(//c/Users/USER/.claude/projects/c--Users-USER-airwriting-imu-only/memory//**)",
+      "Read(//c/Users/USER/.claude/projects/c--Users-USER-airwriting-imu-only/memory/**)",
+      "Bash(py -3 -c ' *)",
+      "Bash(py -3 verify_pipeline.py)",
+      "Bash(py -3 verify_pipeline.py *)",
+      "Bash(py -3 dataset_quality_scan.py)",
+      "Bash(py -3 -m pyflakes *)",
+      "Bash(py -3 -m py_compile *)"
+    ]
+  }
+}

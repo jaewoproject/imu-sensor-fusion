@@ -1,9 +1,8 @@
 """설정 로더 — Hybrid-AirScribe Dual-Node"""
 import yaml, logging
-import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 log = logging.getLogger(__name__)
 

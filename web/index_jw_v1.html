@@ -88,11 +88,19 @@ body{background:#020408;color:#fff;font-family:'Outfit',sans-serif;height:100vh;
 <div class="lbl-3d" id="lbl5">MAMBA SSM<span class="dim">×4 Layers</span></div>
 <div class="lbl-3d" id="lbl6">CLASSIFY<span class="dim">62 Classes</span></div>
 
+<script type="importmap">
+{
+  "imports": {
+    "three": "./js/libs/three.module.js",
+    "three/examples/jsm/": "./js/libs/three/examples/jsm/"
+  }
+}
+</script>
 <script type="module">
-import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
-import{EffectComposer}from'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/EffectComposer.js';
-import{RenderPass}from'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/RenderPass.js';
-import{UnrealBloomPass}from'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/UnrealBloomPass.js';
+import * as THREE from 'three';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
 // ═══════════════════════════════════════════════════
 // EASING

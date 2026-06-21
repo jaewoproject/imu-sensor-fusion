@@ -3,11 +3,16 @@ streaming.py — 연속 문장 스트리밍 인식 로직
 
 프론트엔드 의존 없이, 백엔드에서 센서 데이터를 실시간으로 모아
 글자를 판별하고 문장을 이어나가는 StreamingInference 모듈입니다.
+
+[핵심 수정] 버퍼를 flat list → list of strokes 구조로 변경.
+녹화 데이터와 동일한 획 분리(is_new_stroke 마킹)를 보장하여
+학습/추론 데이터 불일치 문제를 해결합니다.
 """
 
 import time
 import logging
-from typing import Optional, Callable
+import threading
+from typing import Optional, Callable, List, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +21,7 @@ class StreamingInference:
         self,
         ai_engine,
         debounce_time: float = 0.8,
-        char_timeout: float = 0.6,
+        char_timeout: float = 1.0,
         space_timeout: float = 2.0,
     ):
         """
@@ -31,17 +36,28 @@ class StreamingInference:
         self.char_timeout = char_timeout
         self.space_timeout = space_timeout
 
-        self._buffer = []
+        # [핵심] 획 단위 버퍼: 녹화 데이터와 동일한 [[획1], [획2], ...] 구조
+        self._strokes: List[List[Dict]] = []
         self._frame_count = 0
+        self._max_frames = 300  # 총 프레임 수 제한 (약 3.5초)
 
         # State tracking
         self._last_emitted_char: Optional[str] = None
         self._last_emit_time: float = 0.0
         self._last_writing_time: float = time.time()
         self._space_emitted = False
+        self._last_frame_is_writing = False
+        
+        self._tentative_char: Optional[str] = None
+        self._inference_running = False  # 추론 중복 실행 방지 플래그
 
         self.on_text_updated: Optional[Callable[[str, str], None]] = None
         self._current_sentence = ""
+        self._inference_lock = threading.Lock()
+
+    def _total_frames(self) -> int:
+        """현재 버퍼에 쌓인 총 프레임 수"""
+        return sum(len(s) for s in self._strokes)
 
     def process_frame(self, frame_data: dict, is_writing: bool):
         """매 프레임 호출되어 텍스트 스트리밍을 제어합니다."""
@@ -52,20 +68,37 @@ class StreamingInference:
             self._space_emitted = False
             self._frame_count += 1
 
-            # 기존 8채널 (ax, ay, az, gx, gy, gz, x, y) 데이터 버퍼링
-            self._buffer.append(frame_data)
-
-            if len(self._buffer) > 1000:
-                self._buffer.pop(0)
+            # [핵심] is_writing 전환 시 새 획 시작 — 녹화와 동일한 구조
+            if not self._last_frame_is_writing:
+                # 이전에 쓰고 있지 않았으므로 새 획 시작
+                self._strokes.append([])
+            
+            # 현재 획에 프레임 추가
+            self._strokes[-1].append(frame_data)
+            self._last_frame_is_writing = True
+            
+            # 총 프레임 수 제한 (오래된 획부터 제거)
+            while self._total_frames() > self._max_frames and len(self._strokes) > 1:
+                self._strokes.pop(0)
 
         else:    # 글씨를 안 쓰고 있을 때 타임아웃 판정
+            self._last_frame_is_writing = False
             duration_since_writing = now - self._last_writing_time
             
             # 1. 단일 글자 완성 판정 (char_timeout)
-            if duration_since_writing > self.char_timeout and len(self._buffer) > 0:
-                if len(self._buffer) > 10:  # 너무 짧은 노이즈(더블클릭 연타 등) 무시
-                    self._run_inference()
-                self._buffer.clear() # 추론 완료 또는 노이즈면 버퍼 비움
+            if duration_since_writing > self.char_timeout and len(self._strokes) > 0:
+                total = self._total_frames()
+                if total > 3:  # 최소 프레임 수
+                    if self._inference_running:
+                        # 추론 진행 중 → 완료 후 버퍼 비우도록 플래그만 설정
+                        pass
+                    else:
+                        self._run_inference(is_partial=False)
+                        self._strokes = []
+                        self._tentative_char = None
+                else:
+                    self._strokes = []
+                    self._tentative_char = None
 
             # 2. 띄어쓰기 판정 (space_timeout)
             if duration_since_writing > self.space_timeout and not self._space_emitted:
@@ -74,38 +107,88 @@ class StreamingInference:
                 self._space_emitted = True
                 self._last_emitted_char = None # 새 단어이므로 중복방지 해제
 
-    def _run_inference(self):
+    def _run_inference(self, is_partial: bool = False):
         """엔진을 돌려 문자를 가져오고 디바운싱합니다. (Asyncio 이벤트 루프 차단 방지)"""
-        if not self.engine or len(self._buffer) == 0:
+        if not self.engine or len(self._strokes) == 0:
+            return
+        if self._inference_running:  # 이전 추론이 아직 실행 중이면 스킵 (태스크 누적 방지)
             return
 
-        # ai_model의 predict는 [strokes] 형태의 입력을 기대함
-        # 리스트 깊은 복사를 통해 비동기 처리 중 데이터 변조 방지
-        session_strokes = [list(self._buffer)]
+        self._inference_running = True
         
-        # AI 연산이 길어지면 수신 루프가 멈춰 통신이 끊어지므로 별도 스레드로 격리
+        # [핵심 수정] 획 단위로 분리된 데이터를 그대로 전달
+        # 녹화 경로와 정합: 최소 3포인트 미만 획 제거 (main.py:892)
+        session_strokes = [list(s) for s in self._strokes if len(s) > 2]
+        
+        if not session_strokes:
+            self._inference_running = False
+            return
+        
+        n_strokes = len(session_strokes)
+        n_frames = sum(len(s) for s in session_strokes)
+        logger.info(f"🔍 Inference: {n_strokes} strokes, {n_frames} frames")
+
         import asyncio
         try:
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, self._do_predict_and_emit, session_strokes)
+            loop.run_in_executor(None, self._do_predict_and_emit, session_strokes, is_partial)
         except RuntimeError:
-            self._do_predict_and_emit(session_strokes)
+            self._do_predict_and_emit(session_strokes, is_partial)
 
-    def _do_predict_and_emit(self, session_strokes):
-        # 모델 추론 (Heavy computation)
-        predicted_word = self.engine.predict(session_strokes)
+    def _do_predict_and_emit(self, session_strokes, is_partial: bool):
+        try:
+            result = self.engine.predict(session_strokes)
 
-        if predicted_word:
+            if not result:
+                return
+
+            if isinstance(result, tuple) and len(result) == 2:
+                predicted_word, conf = result
+            else:
+                predicted_word = result
+                conf = 1.0
+
+            if not predicted_word:
+                return
+
+            if is_partial and conf < 0.65:  # 부분 추론 임계 완화 (반응성↑)
+                return
+
             char = predicted_word
             now = time.time()
 
-            # Debouncing: 동일 글자가 짧은 시간 내 다시 인식되면 무시
-            is_duplicate = (char == self._last_emitted_char) and ((now - self._last_emit_time) < self.debounce_time)
-            
-            if not is_duplicate:
-                self._emit_char(char)
-                self._last_emitted_char = char
-                self._last_emit_time = now
+            chars_to_emit = []
+
+            with self._inference_lock:
+                if is_partial:
+                    if self._tentative_char != char:
+                        if self._tentative_char is not None:
+                            chars_to_emit.append("<ERASE>")
+                        self._tentative_char = char
+                        chars_to_emit.append(char)
+                        self._last_emitted_char = char
+                        self._last_emit_time = now
+                else:
+                    if self._tentative_char is not None:
+                        if self._tentative_char != char:
+                            chars_to_emit.append("<ERASE>")
+                            chars_to_emit.append(char)
+                        self._tentative_char = None
+                        self._last_emitted_char = char
+                        self._last_emit_time = now
+                    else:
+                        is_duplicate = (char == self._last_emitted_char) and \
+                                       ((now - self._last_emit_time) < self.debounce_time)
+                        if not is_duplicate:
+                            self._last_emitted_char = char
+                            self._last_emit_time = now
+                            chars_to_emit.append(char)
+
+            # 락 외부에서 I/O 발생 (데드락 방지)
+            for c in chars_to_emit:
+                self._emit_char(c)
+        finally:
+            self._inference_running = False
 
     def _emit_char(self, char: str):
         if char == "<ERASE>":
@@ -120,9 +203,15 @@ class StreamingInference:
             self.on_text_updated(self._current_sentence, char)
 
     def reset(self):
-        self._buffer.clear()
+        self._strokes = []
+        self._frame_count = 0
         self._current_sentence = ""
         self._last_emitted_char = None
+        self._last_emit_time = 0.0
+        self._last_writing_time = time.time()
         self._space_emitted = False
+        self._last_frame_is_writing = False
+        self._tentative_char = None
+        self._inference_running = False
         if self.on_text_updated:
             self.on_text_updated("", "")
