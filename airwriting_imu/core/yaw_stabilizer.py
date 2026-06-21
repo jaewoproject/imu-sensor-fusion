@@ -435,6 +435,8 @@ class YawStabilizer:
                 yaw_error = self.mag_fusion.compute_yaw_correction(s3_mag, current_q_wxyz)
                 mag_gain = 0.005 * trust  # 최대 0.005 rad/s 보정
                 mag_yaw_correction = -yaw_error * mag_gain
+                # 한 프레임당 최대 보정량 제한 (갑작스런 튐 방지)
+                mag_yaw_correction = float(np.clip(mag_yaw_correction, -0.002, 0.002))
         
         # 합성: 원본 자이로에 Z축(Yaw) 자기장 보정만 미세하게 추가
         corrected = s3_gyro.copy()

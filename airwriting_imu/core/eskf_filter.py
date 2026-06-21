@@ -155,6 +155,14 @@ class ESKF:
         if v_norm > 2.0:
             self.v = (self.v / v_norm) * 2.0
 
+        # P 행렬 대각선 클램핑 (장시간 사용 시 무한 성장 → 갑작스런 튐 방지)
+        # 필기 중에는 measurement update가 없어 P가 계속 커지므로,
+        # 상한을 두어 ZUPT 발동 시 과도한 보정을 방지합니다.
+        _p_max = [1.0]*3 + [0.5]*3 + [0.1]*3 + [0.05]*3 + [0.01]*3
+        for i in range(15):
+            if P[i, i] > _p_max[i]:
+                P[i, i] = _p_max[i]
+
     def detect_zupt(self, accel_th=0.05, gyro_th=0.05):
         if len(self.a_win) < self.window_size:
             return False
