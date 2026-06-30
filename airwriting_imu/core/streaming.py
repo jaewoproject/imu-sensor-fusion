@@ -7,6 +7,11 @@ streaming.py — 연속 문장 스트리밍 인식 로직
 [핵심 수정] 버퍼를 flat list → list of strokes 구조로 변경.
 녹화 데이터와 동일한 획 분리(is_new_stroke 마킹)를 보장하여
 학습/추론 데이터 불일치 문제를 해결합니다.
+
+[v2 Fix] 인식 씹힘 버그 3건 수정:
+  1. _inference_running 중 요청 → pending 큐로 재시도 보장
+  2. 버퍼를 executor에 복사한 후 비우기 (경쟁 조건 제거)
+  3. 같은 글자 연속 입력 허용 (디바운스 0.8s → 0.3s)
 """
 
 import time
@@ -20,7 +25,7 @@ class StreamingInference:
     def __init__(
         self,
         ai_engine,
-        debounce_time: float = 0.8,
+        debounce_time: float = 0.3,  # [v2] 0.8s → 0.3s: 같은 글자 연속 입력(LL, OO 등) 허용
         char_timeout: float = 1.0,
         space_timeout: float = 2.0,
     ):
@@ -50,8 +55,9 @@ class StreamingInference:
         
         self._tentative_char: Optional[str] = None
         self._inference_running = False  # 추론 중복 실행 방지 플래그
+        self._pending_inference = False  # [v2] 추론 중 새 요청이 들어왔을 때 재시도 플래그
 
-        self.on_text_updated: Optional[Callable[[str, str], None]] = None
+        self.on_text_updated: Optional[Callable[[str, str, float], None]] = None
         self._current_sentence = ""
         self._inference_lock = threading.Lock()
 
@@ -90,12 +96,11 @@ class StreamingInference:
                 total = self._total_frames()
                 if total > 3:  # 최소 프레임 수
                     if self._inference_running:
-                        # 추론 진행 중 → 완료 후 버퍼 비우도록 플래그만 설정
-                        pass
+                        # [v2 Fix] 추론 진행 중 → pending 플래그 설정, 추론 완료 시 재시도
+                        self._pending_inference = True
                     else:
                         self._run_inference(is_partial=False)
-                        self._strokes = []
-                        self._tentative_char = None
+                        # [v2 Fix] 버퍼 비우기는 _run_inference 내부에서 복사 후 수행
                 else:
                     self._strokes = []
                     self._tentative_char = None
@@ -112,13 +117,17 @@ class StreamingInference:
         if not self.engine or len(self._strokes) == 0:
             return
         if self._inference_running:  # 이전 추론이 아직 실행 중이면 스킵 (태스크 누적 방지)
+            self._pending_inference = True  # [v2] 나중에 재시도
             return
 
         self._inference_running = True
+        self._pending_inference = False
         
-        # [핵심 수정] 획 단위로 분리된 데이터를 그대로 전달
+        # [v2 Fix] 버퍼를 먼저 복사한 후 비움 (경쟁 조건 제거)
         # 녹화 경로와 정합: 최소 3포인트 미만 획 제거 (main.py:892)
         session_strokes = [list(s) for s in self._strokes if len(s) > 2]
+        self._strokes = []  # 복사 완료 후 버퍼 비움
+        self._tentative_char = None
         
         if not session_strokes:
             self._inference_running = False
@@ -183,24 +192,34 @@ class StreamingInference:
                             self._last_emitted_char = char
                             self._last_emit_time = now
                             chars_to_emit.append(char)
+                        else:
+                            logger.debug(f"⏭️ Debounce skip: '{char}' (last emit {now - self._last_emit_time:.2f}s ago)")
 
             # 락 외부에서 I/O 발생 (데드락 방지)
             for c in chars_to_emit:
-                self._emit_char(c)
+                self._emit_char(c, conf)
         finally:
             self._inference_running = False
+            
+            # [v2 Fix] 추론 완료 후 pending 요청이 있으면 즉시 재시도
+            if self._pending_inference and len(self._strokes) > 0:
+                self._pending_inference = False
+                total = self._total_frames()
+                if total > 3:
+                    logger.info("🔄 Pending inference retry (was blocked during previous inference)")
+                    self._run_inference(is_partial=False)
 
-    def _emit_char(self, char: str):
+    def _emit_char(self, char: str, confidence: float = 0.0):
         if char == "<ERASE>":
             if len(self._current_sentence) > 0:
                 self._current_sentence = self._current_sentence[:-1]
             logger.info(f"🔙 Stream Erased -> Sentence: '{self._current_sentence}'")
         else:
             self._current_sentence += char
-            logger.info(f"📝 Stream Emitted: '{char}' -> Sentence: '{self._current_sentence}'")
+            logger.info(f"📝 Stream Emitted: '{char}' ({confidence:.0%}) -> Sentence: '{self._current_sentence}'")
             
         if self.on_text_updated:
-            self.on_text_updated(self._current_sentence, char)
+            self.on_text_updated(self._current_sentence, char, confidence)
 
     def reset(self):
         self._strokes = []
@@ -213,5 +232,6 @@ class StreamingInference:
         self._last_frame_is_writing = False
         self._tentative_char = None
         self._inference_running = False
+        self._pending_inference = False
         if self.on_text_updated:
-            self.on_text_updated("", "")
+            self.on_text_updated("", "", 0.0)

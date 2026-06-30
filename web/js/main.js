@@ -887,6 +887,23 @@ function restartServer() {
   document.getElementById("train-status").textContent = "🔄 서버 재시작 중...";
 }
 
+let _textViewerWindow = null;
+function openTextViewer() {
+  // 이미 열려있는 창이 있으면 포커스
+  if (_textViewerWindow && !_textViewerWindow.closed) {
+    _textViewerWindow.focus();
+    return;
+  }
+  const w = 900, h = 600;
+  const left = (screen.width - w) / 2;
+  const top = (screen.height - h) / 2;
+  _textViewerWindow = window.open(
+    'textview.html',
+    'AirWritingTextViewer',
+    `width=${w},height=${h},left=${left},top=${top},resizable=yes`
+  );
+}
+
 function toggleDashboard() {
   const overlay = document.getElementById("dashboard-overlay");
   if (overlay.style.display === "none") {
@@ -1138,6 +1155,7 @@ document.addEventListener("keydown", (e) => {
     case "z": recenterView(); break;
     case " ": e.preventDefault(); toggleConnection(); break;
     case "d": toggleDashboard(); break;
+    case "w": openTextViewer(); break;
     case "t": simulateTyping(); break;
     case "backspace": e.preventDefault(); eraseLastChar(); break;
   }

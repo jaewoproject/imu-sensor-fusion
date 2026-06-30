@@ -207,13 +207,14 @@ async def ws_broadcast(data: dict):
         asyncio.create_task(send_to_client(c))
 
 # ─── Streaming 추론 콜백 ───
-def _on_text_updated(sentence: str, char: str):
+def _on_text_updated(sentence: str, char: str, confidence: float = 0.0):
     """스트리밍 추론기에서 새 문자가 확정될 때 웹소켓으로 전송"""
     if ws_clients and main_loop is not None:
         msg = {
             "type": "streaming_text",
             "sentence": sentence,
-            "latest_char": char
+            "latest_char": char,
+            "confidence": round(confidence, 4)
         }
         asyncio.run_coroutine_threadsafe(ws_broadcast(msg), main_loop)
 
@@ -759,6 +760,14 @@ async def process_serial_queue(queue: asyncio.Queue):
                                 "ts": ts,
                             }))
                         
+                        # Madgwick 경로에 적용될 자이로 바이어스 로그 (ESKF는 자체 처리)
+                        bg_s3 = calibrator.bg['s3']
+                        log.info(
+                            "   [GYRO BIAS] Madgwick 경로 바이어스 보정: (%+.4f, %+.4f, %+.4f) rad/s = (%+.2f, %+.2f, %+.2f) deg/s",
+                            bg_s3[0], bg_s3[1], bg_s3[2],
+                            np.degrees(bg_s3[0]), np.degrees(bg_s3[1]), np.degrees(bg_s3[2]),
+                        )
+                        
                         
                         # 🔬 노이즈 측정 자동 저장 (빵판 vs PCB 비교용)
                         try:
@@ -851,15 +860,20 @@ async def process_serial_queue(queue: asyncio.Queue):
                         pass
 
                 # ── [Phase 1] Madgwick Filter + yaw_stabilizer 보정 ──
+                # 캘리브레이션에서 측정된 자이로 바이어스를 먼저 제거합니다.
+                # ESKF는 내부에서 자체 w_b를 차감하지만, Madgwick 경로는 별도이므로
+                # 여기서 명시적으로 빼줘야 Yaw 드리프트가 발생하지 않습니다.
+                s3_gyro_debiased = frame.finger_gyro - calibrator.bg['s3']
+
                 q_s3_ray_prev = madgwick_s3_ray.q
                 if do_heavy_update:
                     corrected_s3_gyro = yaw_stabilizer.process(
-                        s3_accel=frame.finger_accel, s3_gyro=frame.finger_gyro, s3_mag=frame.finger_mag,
+                        s3_accel=frame.finger_accel, s3_gyro=s3_gyro_debiased, s3_mag=frame.finger_mag,
                         s1_gyro=frame.wrist_gyro, is_writing=is_writing,
                         current_q_wxyz=q_s3_ray_prev, dt=dt
                     )
                 else:
-                    corrected_s3_gyro = frame.finger_gyro
+                    corrected_s3_gyro = s3_gyro_debiased
                 
                 # Madgwick Filter: 오일러 분해 없이 쿼터니언 미분/경사하강 융합
                 q_s3_ray = madgwick_s3_ray.update_imu(frame.finger_accel, corrected_s3_gyro, dt=dt)

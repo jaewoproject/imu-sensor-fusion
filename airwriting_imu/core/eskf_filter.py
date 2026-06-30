@@ -42,6 +42,14 @@ class ESKF:
         self._Fi[6:9, 3:6] = np.eye(3)
         self._Fi[9:12, 6:9] = np.eye(3)
         self._Fi[12:15, 9:12] = np.eye(3)
+
+        # P 행렬 대각선 상한 (장시간 무한 성장 방지)
+        # 원본 [1,0.5,0.1,0.05,0.01]은 버벅임, [10,5,1,0.5,0.1]은 노이즈 과다
+        # 타협: pos/vel은 3배 완화(반응성), att/bias는 원본 근처(노이즈 억제)
+        self._p_max = np.array(
+            [3.0]*3 + [1.5]*3 + [0.2]*3 + [0.1]*3 + [0.02]*3,
+            dtype=np.float64
+        )
         
     def reset(self, initial_q=None, initial_ba=None, initial_bg=None, initial_mag=None):
         self.p = np.zeros(3)
@@ -154,12 +162,13 @@ class ESKF:
             self.v = (self.v / v_norm) * 2.0
 
         # P 행렬 대각선 클램핑 (장시간 사용 시 무한 성장 → 갑작스런 튐 방지)
-        # 필기 중에는 measurement update가 없어 P가 계속 커지므로,
-        # 상한을 두어 ZUPT 발동 시 과도한 보정을 방지합니다.
-        _p_max = [1.0]*3 + [0.5]*3 + [0.1]*3 + [0.05]*3 + [0.01]*3
-        for i in range(15):
-            if P[i, i] > _p_max[i]:
-                P[i, i] = _p_max[i]
+        # 상한은 충분히 넓게 잡아서 정상 동작에는 영향 없고, 10분+ 장시간 사용 시만 개입
+        diag = np.diag(P)
+        mask = diag > self._p_max
+        if np.any(mask):
+            idx = np.where(mask)[0]
+            for i in idx:
+                P[i, i] = self._p_max[i]
 
     def detect_zupt(self, accel_th=0.05, gyro_th=0.05):
         if len(self.a_win) < self.window_size:

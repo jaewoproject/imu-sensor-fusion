@@ -213,7 +213,7 @@ class GyroBiasEstimator:
         
         # 바이어스 추정 (EMA)
         self.bias = np.zeros(3)           # 현재 추정된 바이어스
-        self.bias_alpha = 0.01            # 매우 느린 업데이트
+        self.bias_alpha = 0.05            # 캘리브레이션이 대부분 잡은 뒤 잔여분만 추적
         self.bias_locked = False          # 필기 중엔 잠금
         
         # 윈도우 기반 분산 추정
@@ -423,24 +423,30 @@ class YawStabilizer:
         
         Returns: corrected_s3_gyro (3,) — Madgwick에 직접 넣을 값
         """
-        # Step 1 & 2: (삭제) ZARU 및 S1 Anchor 보정이 시간 경과에 따라 
-        # 잘못된 바이어스를 누적시켜 갑자기 튀는 현상(Jumping)의 주범이 되므로 비활성화.
+        # Step 1: ZARU — Z축(Yaw) 바이어스만 선택적 보정
+        # Roll/Pitch는 Madgwick 중력 경사하강이 자동 보정하므로 건드리지 않습니다.
+        # Z축(Yaw)만 빼줘서 "한쪽으로 서서히 휘는" 드리프트를 차단합니다.
+        # (이전에 전 축 보정 → Roll/Pitch 크로스커플링 → Jumping이었으므로 Z축만 적용)
+        _ = self.bias_estimator.update(s3_accel, s3_gyro, is_writing)
+        z_bias = float(np.clip(self.bias_estimator.bias[2], -0.05, 0.05))
         
-        # Step 3: 적응형 자기장 Yaw 보정 (이것만 유지)
+        # Step 2: (비활성) DualSensorYawAnchor — PCB 안정화 후 재평가
+
+        # Step 3: 적응형 자기장 Yaw 보정 (유지)
         mag_yaw_correction = 0.0
         if s3_mag is not None and current_q_wxyz is not None:
             trust = self.mag_fusion.evaluate(s3_mag, dt)
             
             if trust > 0.5:
                 yaw_error = self.mag_fusion.compute_yaw_correction(s3_mag, current_q_wxyz)
-                mag_gain = 0.005 * trust  # 최대 0.005 rad/s 보정
+                mag_gain = 0.01 * trust  # 최대 0.01 rad/s 보정 (캘리브레이션이 대부분 잡으므로 강화 가능)
                 mag_yaw_correction = -yaw_error * mag_gain
                 # 한 프레임당 최대 보정량 제한 (갑작스런 튐 방지)
-                mag_yaw_correction = float(np.clip(mag_yaw_correction, -0.002, 0.002))
+                mag_yaw_correction = float(np.clip(mag_yaw_correction, -0.003, 0.003))
         
-        # 합성: 원본 자이로에 Z축(Yaw) 자기장 보정만 미세하게 추가
+        # 합성: Z축(Yaw)에만 ZARU 바이어스 보정 + 자기장 미세 보정
         corrected = s3_gyro.copy()
-        corrected[2] += mag_yaw_correction
+        corrected[2] = corrected[2] - z_bias + mag_yaw_correction
         
         return corrected
     
